@@ -33,6 +33,14 @@ pub struct SkillManifest {
     pub reviewed_by: String,
     /// Signature material or signature reference. Presence only is reported.
     pub signature: String,
+    /// Binaries the skill declares it will spawn via subprocess, e.g.
+    /// `sox`, `aplay`. Declared today, audited and surfaced in status;
+    /// runtime `Command::new` interception is deferred to a follow-up.
+    pub subprocess_allowlist: Vec<String>,
+    /// Hostnames the skill declares it will reach over the network,
+    /// e.g. `api.example.com`. Declared today, audited and surfaced;
+    /// per-skill HTTP-client allowlist enforcement is deferred.
+    pub network_hosts: Vec<String>,
 }
 
 /// Audit view of the manifest state for a loaded skill.
@@ -48,6 +56,8 @@ pub struct SkillManifestAudit {
     pub reviewed_by: String,
     pub signed: bool,
     pub error: String,
+    pub subprocess_allowlist: Vec<String>,
+    pub network_hosts: Vec<String>,
 }
 
 /// Runtime load policy for native skills.
@@ -56,6 +66,10 @@ pub struct SkillLoadPolicy {
     pub require_manifest: bool,
     pub require_signature: bool,
     pub denied_permissions: Vec<String>,
+    /// Positive allowlist of permission labels. When non-empty, every
+    /// permission a skill declares must appear here, or load is rejected.
+    /// Empty means no allowlist enforcement.
+    pub allowed_permissions: Vec<String>,
 }
 
 impl From<&SkillPolicyConfig> for SkillLoadPolicy {
@@ -64,6 +78,7 @@ impl From<&SkillPolicyConfig> for SkillLoadPolicy {
             require_manifest: config.require_manifest,
             require_signature: config.require_signature,
             denied_permissions: config.denied_permissions.clone(),
+            allowed_permissions: config.allowed_permissions.clone(),
         }
     }
 }
@@ -81,6 +96,8 @@ impl SkillManifestAudit {
             reviewed_by: String::new(),
             signed: false,
             error: "no sidecar manifest found".into(),
+            subprocess_allowlist: Vec::new(),
+            network_hosts: Vec::new(),
         }
     }
 
@@ -96,6 +113,8 @@ impl SkillManifestAudit {
             reviewed_by: String::new(),
             signed: false,
             error,
+            subprocess_allowlist: Vec::new(),
+            network_hosts: Vec::new(),
         }
     }
 
@@ -143,6 +162,8 @@ impl SkillManifestAudit {
             reviewed_by: manifest.reviewed_by,
             signed,
             error: problems.join("; "),
+            subprocess_allowlist: manifest.subprocess_allowlist,
+            network_hosts: manifest.network_hosts,
         }
     }
 }
@@ -302,6 +323,21 @@ fn enforce_skill_policy(manifest: &SkillManifestAudit, policy: &SkillLoadPolicy)
         .collect::<Vec<_>>();
     if !denied.is_empty() {
         anyhow::bail!("skill requests denied permission(s): {}", denied.join(", "));
+    }
+
+    if !policy.allowed_permissions.is_empty() {
+        let undeclared = manifest
+            .permissions
+            .iter()
+            .filter(|permission| !policy.allowed_permissions.contains(permission))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !undeclared.is_empty() {
+            anyhow::bail!(
+                "skill requests permission(s) not in allowed_permissions: {}",
+                undeclared.join(", ")
+            );
+        }
     }
 
     Ok(())
@@ -660,6 +696,124 @@ mod tests {
         );
         let err = loader.load_skill(&installed_path).unwrap_err();
         assert!(err.to_string().contains("manifest required"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loader_policy_allowlist_rejects_undeclared_permission() {
+        let skill_path = sample_skill_path();
+        let dir = std::env::temp_dir().join(format!(
+            "geniepod-skills-test-allowlist-rejects-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let installed_path = dir.join("hello.so");
+        std::fs::copy(skill_path, &installed_path).unwrap();
+        std::fs::write(
+            dir.join("hello.skill.json"),
+            r#"{
+                "name": "hello_world",
+                "version": "0.1.0",
+                "permissions": ["speech.output", "filesystem.read:/etc/geniepod"]
+            }"#,
+        )
+        .unwrap();
+
+        let mut loader = SkillLoader::new_with_policy(
+            &dir,
+            SkillLoadPolicy {
+                allowed_permissions: vec!["speech.output".into()],
+                ..SkillLoadPolicy::default()
+            },
+        );
+        let err = loader.load_skill(&installed_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not in allowed_permissions"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("filesystem.read:/etc/geniepod"),
+            "expected offending permission in error: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loader_policy_allowlist_accepts_declared_permissions() {
+        let skill_path = sample_skill_path();
+        let dir = std::env::temp_dir().join(format!(
+            "geniepod-skills-test-allowlist-accepts-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let installed_path = dir.join("hello.so");
+        std::fs::copy(skill_path, &installed_path).unwrap();
+        std::fs::write(
+            dir.join("hello.skill.json"),
+            r#"{
+                "name": "hello_world",
+                "version": "0.1.0",
+                "permissions": ["speech.output"]
+            }"#,
+        )
+        .unwrap();
+
+        let mut loader = SkillLoader::new_with_policy(
+            &dir,
+            SkillLoadPolicy {
+                allowed_permissions: vec!["speech.output".into(), "network.http_outbound".into()],
+                ..SkillLoadPolicy::default()
+            },
+        );
+        let name = loader.load_skill(&installed_path).unwrap();
+        assert_eq!(name, "hello_world");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loader_surfaces_subprocess_and_network_manifest_fields() {
+        let skill_path = sample_skill_path();
+        let dir = std::env::temp_dir().join(format!(
+            "geniepod-skills-test-subprocess-network-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let installed_path = dir.join("hello.so");
+        std::fs::copy(skill_path, &installed_path).unwrap();
+        std::fs::write(
+            dir.join("hello.skill.json"),
+            r#"{
+                "name": "hello_world",
+                "version": "0.1.0",
+                "permissions": ["process.spawn:sox", "network.http_outbound"],
+                "subprocess_allowlist": ["sox", "aplay"],
+                "network_hosts": ["api.example.com"]
+            }"#,
+        )
+        .unwrap();
+
+        let mut loader = SkillLoader::new(&dir);
+        loader.load_skill(&installed_path).unwrap();
+        let skill = loader.loaded().first().unwrap();
+        assert_eq!(skill.manifest.status, "ok");
+        assert_eq!(
+            skill.manifest.subprocess_allowlist,
+            vec!["sox".to_string(), "aplay".to_string()]
+        );
+        assert_eq!(
+            skill.manifest.network_hosts,
+            vec!["api.example.com".to_string()]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

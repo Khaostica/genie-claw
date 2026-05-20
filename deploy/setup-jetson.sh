@@ -259,6 +259,44 @@ sudo mkdir -p "$GENIEPOD_DIR/bin" "$GENIEPOD_DIR/docker" "$MODEL_DIR" "$DATA_DIR
 sudo mkdir -p /etc/systemd/system/genie-llm.service.d /etc/systemd/system/genie-ai-runtime.service.d
 sudo chown -R "$(whoami):$(whoami)" "$GENIEPOD_DIR" /run/geniepod
 
+# 1a. Create the dedicated `geniepod` system user that the genie-core
+# systemd unit drops privileges to (issue #23). Idempotent: a re-run will
+# leave an existing user alone and just refresh group membership / data
+# directory ownership. The audit warning "genie-core is running as root"
+# disappears once genie-core.service is reloaded against this user.
+echo "[1a/6] Ensuring 'geniepod' system user exists..."
+if id -u geniepod > /dev/null 2>&1; then
+    echo "  OK: user geniepod already exists"
+else
+    if sudo useradd -r -s /usr/sbin/nologin -d "$GENIEPOD_DIR" -c "GeniePod service user" geniepod; then
+        echo "  Created system user geniepod"
+    else
+        echo "  WARN: failed to create geniepod user — genie-core.service will not start until this is fixed"
+    fi
+fi
+
+# Audio (ALSA / I2S), video and render groups for GPU/CUDA on Jetson —
+# genie-core needs all three to drive Whisper TRT, Piper TTS, and the
+# capture pipeline. Errors are non-fatal so older hosts missing one of
+# these groups still complete setup.
+for grp in audio video render; do
+    if getent group "$grp" > /dev/null 2>&1; then
+        sudo usermod -a -G "$grp" geniepod 2>/dev/null \
+            && echo "  geniepod added to group $grp" \
+            || echo "  WARN: failed to add geniepod to $grp"
+    fi
+done
+
+# Hand the runtime directories the service writes to (config, data, pid
+# files, audio scratch) over to geniepod so the unprivileged process can
+# actually read/write them.
+sudo chown -R geniepod:geniepod "$DATA_DIR" /run/geniepod 2>/dev/null \
+    || echo "  WARN: failed to chown $DATA_DIR /run/geniepod to geniepod"
+if [ -f "$CONFIG_DIR/geniepod.toml" ]; then
+    sudo chown geniepod:geniepod "$CONFIG_DIR/geniepod.toml" 2>/dev/null \
+        || echo "  WARN: failed to chown $CONFIG_DIR/geniepod.toml to geniepod"
+fi
+
 # Clean up stale systemd drop-ins that legacy installs may have left behind.
 # These override the canonical ExecStart in /etc/systemd/system/genie-llm.service
 # and silently mask new flags (--cache-type-k, --ctx-size, etc.) from PR-deployed

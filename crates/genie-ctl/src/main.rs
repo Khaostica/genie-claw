@@ -571,6 +571,18 @@ fn cmd_skill_list() -> Result<()> {
                 skill.manifest.capabilities.join(", ")
             );
         }
+        if !skill.manifest.subprocess_allowlist.is_empty() {
+            println!(
+                "    subprocess: {}",
+                skill.manifest.subprocess_allowlist.join(", ")
+            );
+        }
+        if !skill.manifest.network_hosts.is_empty() {
+            println!(
+                "    network hosts: {}",
+                skill.manifest.network_hosts.join(", ")
+            );
+        }
         if !skill.manifest.reviewed_by.is_empty() || skill.manifest.signed {
             let reviewer = if skill.manifest.reviewed_by.is_empty() {
                 "unreviewed"

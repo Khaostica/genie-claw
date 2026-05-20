@@ -235,6 +235,13 @@ pub struct SkillPolicyConfig {
     /// Reject skills requesting any of these permission labels.
     #[serde(default)]
     pub denied_permissions: Vec<String>,
+
+    /// Positive allowlist of permission labels. When non-empty, every
+    /// permission a skill declares in its manifest must appear here, or
+    /// the skill is rejected at load time. Empty means no allowlist
+    /// enforcement (legacy audit-only behavior).
+    #[serde(default)]
+    pub allowed_permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

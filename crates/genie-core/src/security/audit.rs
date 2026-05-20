@@ -251,7 +251,9 @@ fn check_not_root(findings: &mut Vec<AuditFinding>) {
                 severity: Severity::Warning,
                 message: "genie-core is running as root".into(),
                 remediation:
-                    "Create a dedicated 'geniepod' user: useradd -r -s /bin/false geniepod".into(),
+                    "Re-run deploy/setup-jetson.sh (creates the 'geniepod' system user) and \
+                     reload deploy/systemd/genie-core.service (User=geniepod)."
+                        .into(),
             });
         }
     }
