@@ -505,6 +505,12 @@ pub struct ToolPolicyConfig {
     /// Tools blocked by origin. Deny rules override allow rules.
     #[serde(default)]
     pub denied_tools_by_origin: HashMap<String, Vec<String>>,
+
+    /// Per-tool sliding-window rate limit (calls per minute), keyed by tool
+    /// name. A `*` key applies to every tool that has no explicit entry.
+    /// Tools absent from this map are not rate-limited at the gate.
+    #[serde(default)]
+    pub max_actions_per_minute_by_tool: HashMap<String, usize>,
 }
 
 impl Default for ToolPolicyConfig {
@@ -513,6 +519,7 @@ impl Default for ToolPolicyConfig {
             enabled: defaults::tool_policy_enabled(),
             allowed_tools_by_origin: HashMap::new(),
             denied_tools_by_origin: HashMap::new(),
+            max_actions_per_minute_by_tool: HashMap::new(),
         }
     }
 }
@@ -2396,6 +2403,13 @@ signature_key_dir = "/custom/keys"
         assert!(config.core.tool_policy.enabled);
         assert!(config.core.tool_policy.allowed_tools_by_origin.is_empty());
         assert!(config.core.tool_policy.denied_tools_by_origin.is_empty());
+        assert!(
+            config
+                .core
+                .tool_policy
+                .max_actions_per_minute_by_tool
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2405,6 +2419,7 @@ signature_key_dir = "/custom/keys"
 enabled = true
 allowed_tools_by_origin = { telegram = ["get_time", "memory_recall"] }
 denied_tools_by_origin = { voice = ["web_search"], "*" = ["play_media"] }
+max_actions_per_minute_by_tool = { play_media = 10, "*" = 60 }
 "#,
         )
         .unwrap();
@@ -2416,6 +2431,8 @@ denied_tools_by_origin = { voice = ["web_search"], "*" = ["play_media"] }
         );
         assert_eq!(config.denied_tools_by_origin["voice"], vec!["web_search"]);
         assert_eq!(config.denied_tools_by_origin["*"], vec!["play_media"]);
+        assert_eq!(config.max_actions_per_minute_by_tool["play_media"], 10);
+        assert_eq!(config.max_actions_per_minute_by_tool["*"], 60);
     }
 
     #[test]

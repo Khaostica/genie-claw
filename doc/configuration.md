@@ -148,10 +148,12 @@ Behavior notes:
 | `enabled` | Turn origin-aware tool policy checks on or off |
 | `allowed_tools_by_origin` | Optional origin allowlists; if present, only listed tools can run |
 | `denied_tools_by_origin` | Optional origin denylists; deny rules override allow rules |
+| `max_actions_per_minute_by_tool` | Optional per-tool sliding-window call cap enforced at the dispatch gate (a `*` key applies to tools without an entry) |
 
 Behavior notes:
 
 - Defaults allow all tools unless a rule exists.
+- `max_actions_per_minute_by_tool` is empty by default (no per-tool cap); the limit covers every tool, including skill-backed ones, since it runs at the single dispatch gate.
 - Origin keys are `voice`, `dashboard`, `api`, `telegram`, `repl`, `confirmation`, `unknown`, or `*`.
 - Tool lists can include explicit tool names or `*`.
 - Deny rules override allow rules.

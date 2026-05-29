@@ -2,7 +2,17 @@
 
 ## Unreleased
 
-- Nothing yet.
+- **Per-tool rate limits at the dispatch gate** (#22): the tool gate already
+  enforced per-origin ACLs and per-origin actuation rate limits, but the
+  per-tool cap the issue calls for did not exist — only home actuation was
+  throttled, and skill-backed tools were not throttled at all. A new
+  `[core.tool_policy].max_actions_per_minute_by_tool` map applies a 60-second
+  sliding-window cap keyed by tool name at `ToolDispatcher::execute_with_context`,
+  so the limit covers every tool (including skills) at the single chokepoint. A
+  `*` key applies to any tool without an explicit entry; a limit of `0` blocks
+  the tool outright. The map is empty by default, so existing deployments are
+  unchanged. Over-limit calls return a failed result and are recorded in the
+  tool audit log like any other gate decision.
 
 ## 1.0.0-alpha.10 - 2026-05-29
 

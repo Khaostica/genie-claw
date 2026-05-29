@@ -60,6 +60,7 @@ expected_runtime_contract_hash = ""  # Optional: pin after a known-good boot.
 # enabled = true
 # allowed_tools_by_origin = { voice = ["get_time", "get_weather", "memory_recall"] }
 # denied_tools_by_origin = { telegram = ["play_media"], "*" = [] }
+# max_actions_per_minute_by_tool = { play_media = 10, web_search = 20 }
 
 # [core.actuation_safety]
 # enabled = true

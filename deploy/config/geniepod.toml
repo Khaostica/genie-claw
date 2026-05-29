@@ -180,6 +180,9 @@ wakeword_script = ""              # Empty = push-to-talk.
 # enabled = true
 # allowed_tools_by_origin = { voice = ["get_time", "get_weather", "memory_recall", "home_status", "home_control"] }
 # denied_tools_by_origin = { telegram = ["play_media"], "*" = [] }
+# Per-tool sliding-window rate limit (calls/min) at the dispatch gate; covers
+# every tool including skills. A "*" key applies to tools without an entry.
+# max_actions_per_minute_by_tool = { play_media = 10, web_search = 20 }
 
 # Final actuation safety gate for physical home-control execution:
 # [core.actuation_safety]

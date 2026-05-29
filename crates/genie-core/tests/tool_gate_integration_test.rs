@@ -274,6 +274,97 @@ async fn tool_gate_rate_limit_allows_n_then_denies_and_audits() {
 }
 
 #[tokio::test]
+async fn tool_gate_per_tool_rate_limit_allows_n_then_denies_and_audits() {
+    let paths = TestAuditPaths::new();
+    let mut policy = ToolPolicyConfig::default();
+    policy
+        .max_actions_per_minute_by_tool
+        .insert("get_time".into(), 2);
+
+    // No home provider needed: get_time is a pure read-only tool, so this
+    // proves the gate rate-limits every tool, not just home actuation.
+    let dispatcher = paths.dispatcher(None, policy, ActuationSafetyConfig::default());
+    let call = ToolCall {
+        name: "get_time".into(),
+        arguments: serde_json::json!({}),
+    };
+    let ctx = ToolExecutionContext {
+        request_origin: RequestOrigin::Api,
+        ..ToolExecutionContext::default()
+    };
+
+    let first = dispatcher.execute_with_context(&call, ctx).await;
+    let second = dispatcher.execute_with_context(&call, ctx).await;
+    let third = dispatcher.execute_with_context(&call, ctx).await;
+
+    assert!(first.success, "first call within limit: {}", first.output);
+    assert!(
+        second.success,
+        "second call within limit: {}",
+        second.output
+    );
+    assert!(!third.success, "third call must be rate-limited");
+    assert!(
+        third.output.contains("rate limit"),
+        "expected a rate-limit refusal, got: {}",
+        third.output
+    );
+
+    let events = read_jsonl(&paths.tool_audit);
+    assert_eq!(events.len(), 3, "every dispatch attempt is audited");
+    assert_eq!(events[0]["success"], true);
+    assert_eq!(events[1]["success"], true);
+    assert_eq!(events[2]["success"], false);
+    assert_eq!(events[2]["tool"], "get_time");
+    assert_eq!(events[2]["origin"], "api");
+    assert_append_only(&paths.tool_audit, 3);
+}
+
+#[tokio::test]
+async fn tool_gate_per_tool_rate_limit_wildcard_applies_to_all_tools() {
+    let paths = TestAuditPaths::new();
+    let mut policy = ToolPolicyConfig::default();
+    // A `*` cap applies to any tool without an explicit entry.
+    policy.max_actions_per_minute_by_tool.insert("*".into(), 1);
+
+    let dispatcher = paths.dispatcher(None, policy, ActuationSafetyConfig::default());
+    let ctx = ToolExecutionContext {
+        request_origin: RequestOrigin::Api,
+        ..ToolExecutionContext::default()
+    };
+    let time_call = ToolCall {
+        name: "get_time".into(),
+        arguments: serde_json::json!({}),
+    };
+    let calc_call = ToolCall {
+        name: "calculate".into(),
+        arguments: serde_json::json!({"expression": "1+1"}),
+    };
+
+    // Each distinct tool gets its own one-per-minute window.
+    assert!(
+        dispatcher
+            .execute_with_context(&time_call, ctx)
+            .await
+            .success
+    );
+    assert!(
+        !dispatcher
+            .execute_with_context(&time_call, ctx)
+            .await
+            .success,
+        "second get_time call must hit the wildcard cap"
+    );
+    assert!(
+        dispatcher
+            .execute_with_context(&calc_call, ctx)
+            .await
+            .success,
+        "a different tool has an independent window"
+    );
+}
+
+#[tokio::test]
 async fn tool_gate_confirmation_token_refused_without_pending() {
     let paths = TestAuditPaths::new();
     let executed = Arc::new(Mutex::new(Vec::new()));

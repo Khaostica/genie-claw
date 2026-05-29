@@ -20,6 +20,7 @@ use crate::ha::HomeAutomationProvider;
 use crate::skills::SkillLoader;
 
 const ACTUATION_RATE_WINDOW_MS: u64 = 60_000;
+const TOOL_RATE_WINDOW_MS: u64 = 60_000;
 
 /// Tool definition for LLM function calling.
 ///
@@ -99,6 +100,7 @@ pub struct ToolDispatcher {
     confirmations: Arc<ConfirmationManager>,
     action_ledger: Arc<ActionLedger>,
     actuation_rate_limiter: Arc<ActuationRateLimiter>,
+    tool_rate_limiter: Arc<ToolRateLimiter>,
     audit_logger: AuditLogger,
     tool_audit_logger: ToolAuditLogger,
     pub(crate) timers: timer::TimerManager,
@@ -107,6 +109,14 @@ pub struct ToolDispatcher {
 #[derive(Debug, Default)]
 struct ActuationRateLimiter {
     attempts: Mutex<HashMap<RequestOrigin, VecDeque<u64>>>,
+}
+
+/// Per-tool sliding-window rate limiter applied at the dispatch gate, so the
+/// cap covers every tool (including skill-backed ones), not just home
+/// actuation.
+#[derive(Debug, Default)]
+struct ToolRateLimiter {
+    attempts: Mutex<HashMap<String, VecDeque<u64>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,6 +179,7 @@ impl ToolDispatcher {
             confirmations: Arc::new(ConfirmationManager::default()),
             action_ledger: Arc::new(ActionLedger::default()),
             actuation_rate_limiter: Arc::new(ActuationRateLimiter::default()),
+            tool_rate_limiter: Arc::new(ToolRateLimiter::default()),
             audit_logger: AuditLogger::disabled(),
             tool_audit_logger: ToolAuditLogger::default(),
             timers: timer::TimerManager::new(),
@@ -239,6 +250,7 @@ impl ToolDispatcher {
                 "enabled": self.tool_policy.enabled,
                 "allowed_tools_by_origin": &self.tool_policy.allowed_tools_by_origin,
                 "denied_tools_by_origin": &self.tool_policy.denied_tools_by_origin,
+                "max_actions_per_minute_by_tool": &self.tool_policy.max_actions_per_minute_by_tool,
             },
             "actuation_safety": {
                 "enabled": self.actuation_safety.enabled,
@@ -536,6 +548,20 @@ impl ToolDispatcher {
                 action_class,
                 success: false,
                 output: format!("Tool blocked by origin policy: {err}"),
+            };
+            self.audit_tool_call(call, exec_ctx, started, &tool_result);
+            return tool_result;
+        }
+
+        if let Err(err) = self
+            .tool_rate_limiter
+            .check_and_record(&self.tool_policy, &call.name)
+        {
+            let tool_result = ToolResult {
+                tool: call.name.clone(),
+                action_class,
+                success: false,
+                output: format!("Tool rate limit exceeded: {err}"),
             };
             self.audit_tool_call(call, exec_ctx, started, &tool_result);
             return tool_result;
@@ -1366,6 +1392,46 @@ fn actuation_rate_limit(config: &ActuationSafetyConfig, origin: RequestOrigin) -
         .find(|(key, _)| key.trim().eq_ignore_ascii_case(origin.as_policy_key()))
         .map(|(_, limit)| *limit)
         .unwrap_or(config.max_actions_per_minute)
+}
+
+impl ToolRateLimiter {
+    fn check_and_record(&self, policy: &ToolPolicyConfig, tool_name: &str) -> Result<()> {
+        if !policy.enabled {
+            return Ok(());
+        }
+        let Some(limit) = tool_rate_limit(policy, tool_name) else {
+            return Ok(());
+        };
+        if limit == 0 {
+            anyhow::bail!(
+                "tool '{}' is rate-limited to zero calls per minute",
+                tool_name
+            );
+        }
+
+        let now = now_ms();
+        let cutoff = now.saturating_sub(TOOL_RATE_WINDOW_MS);
+        let mut attempts = self.attempts.lock().expect("tool rate limiter lock");
+        let bucket = attempts.entry(tool_name.to_string()).or_default();
+        while bucket.front().copied().is_some_and(|ts| ts < cutoff) {
+            bucket.pop_front();
+        }
+        if bucket.len() >= limit {
+            anyhow::bail!("tool '{}' exceeded {} call(s) per minute", tool_name, limit);
+        }
+        bucket.push_back(now);
+        Ok(())
+    }
+}
+
+/// Resolve the per-minute call cap for `tool_name`: an exact key wins over the
+/// `*` fallback; absence of both means the tool is not rate-limited.
+fn tool_rate_limit(policy: &ToolPolicyConfig, tool_name: &str) -> Option<usize> {
+    policy
+        .max_actions_per_minute_by_tool
+        .get(tool_name)
+        .or_else(|| policy.max_actions_per_minute_by_tool.get("*"))
+        .copied()
 }
 
 fn memory_query(args: &serde_json::Value) -> &str {
